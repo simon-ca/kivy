@@ -325,7 +325,7 @@ cdef class StripMesh(VertexInstruction):
         self.li += icount
         return 1
 
-
+"""
 cdef class Mesh(VertexInstruction):
     '''A 2d mesh.
 
@@ -471,6 +471,195 @@ cdef class Mesh(VertexInstruction):
                     'Cannot upload more than 65535 indices (OpenGL ES 2'
                     ' limitation - consider setting KIVY_GLES_LIMITS)')
             self._indices = list(value)
+            self.flag_update()
+
+    property mode:
+        '''VBO Mode used for drawing vertices/indices. Can be one of 'points',
+        'line_strip', 'line_loop', 'lines', 'triangles', 'triangle_strip' or
+        'triangle_fan'.
+        '''
+        def __get__(self):
+            self.batch.get_mode()
+        def __set__(self, mode):
+            self.batch.set_mode(mode)
+"""
+
+cdef class Mesh(VertexInstruction):
+    '''A 2d mesh.
+
+    In OpenGL ES 2.0 and in our graphics implementation, you cannot have more
+    than 65535 indices.
+
+    A list of vertices is described as::
+
+        vertices = [x1, y1, u1, v1, x2, y2, u2, v2, ...]
+                    |            |  |            |
+                    +---- i1 ----+  +---- i2 ----+
+
+    If you want to draw a triangle, add 3 vertices. You can then make an
+    indices list as follows:
+
+        indices = [0, 1, 2]
+
+    .. versionadded:: 1.1.0
+
+    :Parameters:
+        `vertices`: list
+            List of vertices in the format (x1, y1, u1, v1, x2, y2, u2, v2...).
+        `indices`: list
+            List of indices in the format (i1, i2, i3...).
+        `mode`: str
+            Mode of the vbo. Check :attr:`mode` for more information. Defaults to
+            'points'.
+        `fmt`: list
+            The format for vertices, by default, each vertex is described by 2D
+            coordinates (x, y) and 2D texture coordinate (u, v).
+            Each element of the list should be a tuple or list, of the form
+
+                (variable_name, size, type)
+
+            which will allow mapping vertex data to the glsl instructions.
+
+                [(b'v_pos', 2, b'float'), (b'v_tc', 2, b'float'),]
+
+            will allow using
+
+                attribute vec2 v_pos;
+                attribute vec2 v_tc;
+
+            in glsl's vertex shader.
+
+    .. versionchanged:: 1.9.2
+        Before, `vertices` and `indices` would always be converted to a list,
+        now, they are only converted to a list if they do not implement the
+        buffer interface. So e.g. numpy arrays, python arrays etc. are used
+        in place, without creating any additional copies. However, the
+        buffers cannot be readonly (even though they are not changed, due to
+        a cython limitation) and must be contiguous in memory.
+
+    ..note::
+        When passing a memoryview or a instance that implements the buffer
+        interface, `vertices` should be a buffer of floats (`'f'` code in
+        python array) and `indices` should be a buffer of unsigned short (`'H'`
+        code in python array). Arrays in other formats will still have to be
+        converted internally, negating any potential gain.
+    '''
+
+    def __init__(self, **kwargs):
+        cdef VBO vbo
+        VertexInstruction.__init__(self, **kwargs)
+        v = kwargs.get('vertices')
+        self.vertices = v if v is not None else []
+        v = kwargs.get('indices')
+        self.indices = v if v is not None else []
+        fmt = kwargs.get('fmt')
+        if fmt is not None:
+            if isinstance(fmt, VertexFormat):
+                self.vertex_format = fmt
+            else:
+                self.vertex_format = VertexFormat(*fmt)
+            vbo = VBO(self.vertex_format)
+            self.batch = VertexBatch(vbo=vbo)
+        self.mode = kwargs.get('mode') or 'points'
+        self.is_built = 0
+
+    cdef void build_triangle_fan(self, float *vertices, int vcount, int icount):
+        cdef i
+        cdef unsigned short *indices = NULL
+        cdef vsize = self.batch.vbo.vertex_format.vsize
+
+        if vcount == 0 or icount == 0:
+            self.batch.clear_data()
+            return
+
+        indices = <unsigned short *>malloc(icount * sizeof(unsigned short))
+        if indices == NULL:
+            free(vertices)
+            raise MemoryError('indices')
+
+        for i in range(icount):
+            indices[i] = i
+
+        self.batch.set_data(vertices, <int>(vcount / vsize), indices,
+                <int>icount)
+
+        free(indices)
+        self.is_built = 1
+
+    cdef void build(self):
+        if self.is_built:
+            return
+        #cdef int i
+        #cdef long vcount = len(self._vertices)
+        #cdef long icount = len(self._indices)
+        #cdef float *vertices = NULL
+        #cdef unsigned short *indices = NULL
+        #cdef list lvertices = self._vertices
+        #cdef list lindices = self._indices
+        cdef vsize = self.batch.vbo.vertex_format.vsize
+
+        if len(self._vertices) != self.vcount:
+            self._vertices, self._fvertices = _ensure_float_view(self._vertices, &self._pvertices)
+            self.vcount = len(self._vertices)
+
+        if len(self._indices) != self.icount:
+            if gles_limts and len(self._indices) > 65535:
+                raise GraphicException(
+                    'Cannot upload more than 65535 indices (OpenGL ES 2'
+                    ' limitation - consider setting KIVY_GLES_LIMITS)')
+            self._indices, self._lindices = _ensure_ushort_view(self._indices, &self._pindices)
+            self.icount = len(self._indices)
+
+        if self.vcount == 0 or self.icount == 0:
+            self.batch.clear_data()
+            return
+
+        #vertices = <float *>malloc(vcount * sizeof(float))
+        #if vertices == NULL:
+        #    raise MemoryError('vertices')
+
+        #indices = <unsigned short *>malloc(icount * sizeof(unsigned short))
+        #if indices == NULL:
+        #    free(vertices)
+        #    raise MemoryError('indices')
+
+        #for i in xrange(vcount):
+        #    vertices[i] = lvertices[i]
+        #for i in xrange(icount):
+        #    indices[i] = lindices[i]
+
+        self.batch.set_data(&self._pvertices[0], <int>(self.vcount / vsize), &self._pindices[0], <int>self.icount)
+
+        #free(vertices)
+        #free(indices)
+
+    property vertices:
+        '''List of x, y, u, v coordinates used to construct the Mesh. Right now,
+        the Mesh instruction doesn't allow you to change the format of the
+        vertices, which means it's only x, y + one texture coordinate.
+        '''
+        def __get__(self):
+            #print "Vertices type {}".format(type(self._vertices))
+            return self._vertices
+        def __set__(self, value):
+            #print "set vertices value type: {}".format(type(value))
+            self._vertices, self._fvertices = _ensure_float_view(value, &self._pvertices)
+            self.vcount = len(self._vertices)
+            self.flag_update()
+
+    property indices:
+        '''Vertex indices used to specify the order when drawing the
+        mesh.
+        '''
+        def __get__(self):
+            return self._indices
+        def __set__(self, value):
+            if gles_limts and len(value) > 65535:
+                raise GraphicException(
+                    'Cannot upload more than 65535 indices (OpenGL ES 2'
+                    ' limitation - consider setting KIVY_GLES_LIMITS)')
+            self._indices, self._lindices = _ensure_ushort_view(value, &self._pindices)
+            self.icount = len(self._indices)
             self.flag_update()
 
     property mode:
